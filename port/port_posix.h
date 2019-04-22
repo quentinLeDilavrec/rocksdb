@@ -56,6 +56,11 @@
 #include <limits>
 #include <string>
 
+#include <functional>
+#include "rsg/engine.hpp"
+#include "rsg/actor.hpp"
+#include "rsg/mutex.hpp"
+
 #ifndef PLATFORM_IS_LITTLE_ENDIAN
 #define PLATFORM_IS_LITTLE_ENDIAN (__BYTE_ORDER == __LITTLE_ENDIAN)
 #endif
@@ -122,6 +127,7 @@ class Mutex {
  private:
   friend class CondVar;
   pthread_mutex_t mu_;
+  simgrid::rsg::Mutex *rsgMutex;
 #ifndef NDEBUG
   bool locked_;
 #endif
@@ -144,6 +150,7 @@ class RWMutex {
 
  private:
   pthread_rwlock_t mu_; // the underlying platform mutex
+  simgrid::rsg::Mutex *rsgMutex;
 
   // No copying allowed
   RWMutex(const RWMutex&);
@@ -162,9 +169,181 @@ class CondVar {
  private:
   pthread_cond_t cv_;
   Mutex* mu_;
+  simgrid::rsg::ConditionVariable *rsgCond;
 };
 
-using Thread = std::thread;
+class instrumentedThread
+{
+  std::thread* _thread;
+  simgrid::rsg::Actor *actor;
+
+  template<typename Functor, typename... Args>
+    typename std::enable_if<
+    std::is_member_pointer<typename std::decay<Functor>::type>::value,
+    typename std::result_of<Functor&&(Args&&...)>::type
+    >::type invoke(Functor&& f, Args&&... args)
+    {
+      return std::mem_fn(f)(std::forward<Args>(args)...);
+    }
+
+  template<typename Functor, typename... Args>
+    typename std::enable_if<
+    !std::is_member_pointer<typename std::decay<Functor>::type>::value,
+    typename std::result_of<Functor&&(Args&&...)>::type
+    >::type invoke(Functor&& f, Args&&... args)
+    {
+      return std::forward<Functor>(f)(std::forward<Args>(args)...);
+  }
+
+  template <typename Fun, typename Arg0, typename... Args>
+    intptr_t newfunc(Fun &&f, Arg0 thisPtr, Args... args) {
+      f(thisPtr, args...);
+    return (intptr_t)NULL; // TODO get return value
+  }
+
+  template <typename Fun, typename Arg0, typename... Args>
+    intptr_t newfunc(Fun &&f, Arg0* thisPtr, Args... args) {
+    if(std::is_member_function_pointer<decltype(f)>::value)
+      (invoke(std::forward<Fun>(f),*thisPtr,std::forward<Args>(args)...));
+    else
+      (invoke(std::forward<Fun>(f),thisPtr,std::forward<Args>(args)...));
+    return (intptr_t)NULL; // TODO get return value
+  }
+public:
+  instrumentedThread() noexcept = default;
+  instrumentedThread(instrumentedThread&) = delete;
+  instrumentedThread(const instrumentedThread&) = delete;
+  instrumentedThread(const instrumentedThread&&) = delete;
+  instrumentedThread(instrumentedThread&& t) noexcept {
+    swap(t);
+  }
+
+  template<typename Arg>
+  explicit
+    instrumentedThread(void* (*f)(void*), Arg arg)
+  {
+    if (simgrid::rsg::isClient()) {
+      simgrid::rsg::HostPtr currhost = simgrid::rsg::Host::current();
+      auto newcode = [&](void* d) {
+                                   f(arg);
+                                   return (intptr_t)NULL;
+      };
+      actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
+    } else {
+      _thread = new std::thread(f, arg);
+    }
+  }
+
+  explicit
+    instrumentedThread(std::function<void()> f)
+    {
+      if (simgrid::rsg::isClient()) {
+        simgrid::rsg::HostPtr currhost = simgrid::rsg::Host::current();
+        auto newcode = [&](void* d) {
+                                     f();
+                                     return (intptr_t)NULL;
+        };
+        actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
+      } else {
+        _thread = new std::thread(f);
+      }
+  }
+  template<typename Callable>
+    explicit
+    instrumentedThread(Callable&& f)
+  {
+    if (simgrid::rsg::isClient()) {
+      simgrid::rsg::HostPtr currhost = simgrid::rsg::Host::current();
+      auto newcode = [&](void* d) {
+                                   f();
+                                   return (intptr_t)NULL;
+      };
+      actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
+    } else {
+      _thread = new std::thread(f);
+    }
+  }
+  template<typename Callable, typename... Args>
+    explicit
+    instrumentedThread(Callable&& f, Args&&... args)
+    {
+      if (simgrid::rsg::isClient()) {
+        simgrid::rsg::HostPtr currhost = simgrid::rsg::Host::current();
+        auto newcode = [&](void* d) {
+          return newfunc(std::forward<Callable>(f), std::forward<Args>(args)...);
+        };
+        actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
+      } else {
+        _thread = new std::thread(f, args...);
+      }
+    }
+  ~instrumentedThread()
+  {
+    if (simgrid::rsg::isClient()) {
+      delete actor;
+    }
+    delete _thread;
+  }
+  instrumentedThread& operator=(const instrumentedThread&) = delete;
+  instrumentedThread& operator=(instrumentedThread&& t) noexcept
+  {
+    if (joinable())
+      std::terminate();
+    swap(t);
+    return *this;
+  }
+  void
+    swap(instrumentedThread& t) noexcept;
+  bool
+  joinable() const noexcept;
+  /* { return !(_M_id == id()); } */
+  void
+  join();
+  void
+  detach();
+  std::thread::id
+    get_id() const noexcept;
+  /* { return _M_id; } */
+  /** @pre thread is joinable
+    */
+  std::thread::native_handle_type
+  native_handle();
+  // Returns a value that hints at the number of hardware thread contexts.
+  static unsigned int
+  hardware_concurrency() noexcept
+  {
+    return std::thread::hardware_concurrency();
+  }
+/*
+#if _GLIBCXX_THREAD_ABI_COMPAT
+public:
+  struct _Impl_base;
+  typedef shared_ptr<_Impl_base>        __shared_base_type;
+  struct _Impl_base
+  {
+    __shared_base_type        _M_this_ptr;
+    virtual ~_Impl_base() = default;
+    virtual void _M_run() = 0;
+  };
+#endif
+*/
+/*
+public:
+  // Returns a call wrapper that does
+  // INVOKE(DECAY_COPY(__callable), DECAY_COPY(__args)).
+  template<typename _Callable, typename... _Args>
+    static __invoker_type<_Callable, _Args...>
+    __make_invoker(_Callable&& __callable, _Args&&... __args)
+    {
+      return { {
+          std::make_tuple(std::forward<_Callable>(__callable),
+                          std::forward<_Args>(__args)...)
+      } };
+    }
+*/
+};
+
+using Thread = instrumentedThread;
 
 static inline void AsmVolatilePause() {
 #if defined(__i386__) || defined(__x86_64__)

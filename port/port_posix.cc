@@ -24,6 +24,11 @@
 #include <cstdlib>
 #include "util/logging.h"
 
+#include "rsg/engine.hpp"
+#include "rsg/actor.hpp"
+
+using namespace ::simgrid;
+
 namespace rocksdb {
 namespace port {
 
@@ -36,31 +41,46 @@ static int PthreadCall(const char* label, int result) {
 }
 
 Mutex::Mutex(bool adaptive) {
-  (void) adaptive;
-#ifdef ROCKSDB_PTHREAD_ADAPTIVE_MUTEX
-  if (!adaptive) {
-    PthreadCall("init mutex", pthread_mutex_init(&mu_, nullptr));
+  if (rsg::isClient()) {
+    rsgMutex = new rsg::Mutex();
   } else {
-    pthread_mutexattr_t mutex_attr;
-    PthreadCall("init mutex attr", pthread_mutexattr_init(&mutex_attr));
-    PthreadCall("set mutex attr",
-                pthread_mutexattr_settype(&mutex_attr,
-                                          PTHREAD_MUTEX_ADAPTIVE_NP));
-    PthreadCall("init mutex", pthread_mutex_init(&mu_, &mutex_attr));
-    PthreadCall("destroy mutex attr",
-                pthread_mutexattr_destroy(&mutex_attr));
-  }
+    (void) adaptive;
+#ifdef ROCKSDB_PTHREAD_ADAPTIVE_MUTEX
+    if (!adaptive) {
+      PthreadCall("init mutex", pthread_mutex_init(&mu_, nullptr));
+    } else {
+      pthread_mutexattr_t mutex_attr;
+      PthreadCall("init mutex attr", pthread_mutexattr_init(&mutex_attr));
+      PthreadCall("set mutex attr",
+                  pthread_mutexattr_settype(&mutex_attr,
+                                            PTHREAD_MUTEX_ADAPTIVE_NP));
+      PthreadCall("init mutex", pthread_mutex_init(&mu_, &mutex_attr));
+      PthreadCall("destroy mutex attr",
+                  pthread_mutexattr_destroy(&mutex_attr));
+    }
 #else
-  PthreadCall("init mutex", pthread_mutex_init(&mu_, nullptr));
+    PthreadCall("init mutex", pthread_mutex_init(&mu_, nullptr));
 #endif // ROCKSDB_PTHREAD_ADAPTIVE_MUTEX
+  }
 }
 
-Mutex::~Mutex() { PthreadCall("destroy mutex", pthread_mutex_destroy(&mu_)); }
+Mutex::~Mutex() {
+  if (rsg::isClient()) {
+    rsgMutex->destroy();
+    delete rsgMutex;
+  } else {
+    PthreadCall("destroy mutex", pthread_mutex_destroy(&mu_));
+  }
+}
 
 void Mutex::Lock() {
-  PthreadCall("lock", pthread_mutex_lock(&mu_));
+  if (rsg::isClient()) {
+    rsgMutex->lock();
+  } else {
+    PthreadCall("lock", pthread_mutex_lock(&mu_));
+  }
 #ifndef NDEBUG
-  locked_ = true;
+    locked_ = true;
 #endif
 }
 
@@ -68,7 +88,11 @@ void Mutex::Unlock() {
 #ifndef NDEBUG
   locked_ = false;
 #endif
-  PthreadCall("unlock", pthread_mutex_unlock(&mu_));
+  if (rsg::isClient()) {
+    rsgMutex->unlock();
+  } else {
+    PthreadCall("unlock", pthread_mutex_unlock(&mu_));
+  }
 }
 
 void Mutex::AssertHeld() {
@@ -79,16 +103,31 @@ void Mutex::AssertHeld() {
 
 CondVar::CondVar(Mutex* mu)
     : mu_(mu) {
+  if (simgrid::rsg::isClient()) {
+    rsgCond = new simgrid::rsg::ConditionVariable();
+  } else {
     PthreadCall("init cv", pthread_cond_init(&cv_, nullptr));
+  }
 }
 
-CondVar::~CondVar() { PthreadCall("destroy cv", pthread_cond_destroy(&cv_)); }
+CondVar::~CondVar() {
+  if (simgrid::rsg::isClient()) {
+    rsgCond->destroy();
+    delete rsgCond;
+  } else {
+    PthreadCall("destroy cv", pthread_cond_destroy(&cv_));
+  }
+}
 
 void CondVar::Wait() {
 #ifndef NDEBUG
   mu_->locked_ = false;
 #endif
-  PthreadCall("wait", pthread_cond_wait(&cv_, &mu_->mu_));
+  if (simgrid::rsg::isClient()) {
+    rsgCond->wait(mu_->rsgMutex);
+  } else {
+    PthreadCall("wait", pthread_cond_wait(&cv_, &mu_->mu_));
+  }
 #ifndef NDEBUG
   mu_->locked_ = true;
 #endif
@@ -102,7 +141,12 @@ bool CondVar::TimedWait(uint64_t abs_time_us) {
 #ifndef NDEBUG
   mu_->locked_ = false;
 #endif
-  int err = pthread_cond_timedwait(&cv_, &mu_->mu_, &ts);
+  int err;
+  if (simgrid::rsg::isClient()) {
+    err = (int)rsgCond->wait_for(mu_->rsgMutex, (double(abs_time_us))/1000000.0);
+  } else {
+    err = pthread_cond_timedwait(&cv_, &mu_->mu_, &ts);
+  }
 #ifndef NDEBUG
   mu_->locked_ = true;
 #endif
@@ -116,26 +160,69 @@ bool CondVar::TimedWait(uint64_t abs_time_us) {
 }
 
 void CondVar::Signal() {
-  PthreadCall("signal", pthread_cond_signal(&cv_));
+  if (simgrid::rsg::isClient()) {
+    rsgCond->notify_one();
+  } else {
+    PthreadCall("signal", pthread_cond_signal(&cv_));
+  }
 }
 
 void CondVar::SignalAll() {
-  PthreadCall("broadcast", pthread_cond_broadcast(&cv_));
+  if (simgrid::rsg::isClient()) {
+    rsgCond->notify_all();
+  } else {
+    PthreadCall("broadcast", pthread_cond_broadcast(&cv_));
+  }
 }
 
 RWMutex::RWMutex() {
-  PthreadCall("init mutex", pthread_rwlock_init(&mu_, nullptr));
+  if (simgrid::rsg::isClient()) {
+    rsgMutex = new simgrid::rsg::Mutex();
+  } else {
+    PthreadCall("init mutex", pthread_rwlock_init(&mu_, nullptr));
+  }
 }
 
-RWMutex::~RWMutex() { PthreadCall("destroy mutex", pthread_rwlock_destroy(&mu_)); }
+RWMutex::~RWMutex() {
+  if (simgrid::rsg::isClient()) {
+    rsgMutex->destroy();
+    delete rsgMutex;
+  } else {
+    PthreadCall("destroy mutex", pthread_rwlock_destroy(&mu_));
+  }
+}
 
-void RWMutex::ReadLock() { PthreadCall("read lock", pthread_rwlock_rdlock(&mu_)); }
+void RWMutex::ReadLock() {
+  if (simgrid::rsg::isClient()) {
+    rsgMutex->lock();
+  } else {
+    PthreadCall("read lock", pthread_rwlock_rdlock(&mu_));
+  }
+}
 
-void RWMutex::WriteLock() { PthreadCall("write lock", pthread_rwlock_wrlock(&mu_)); }
+void RWMutex::WriteLock() {
+  if (simgrid::rsg::isClient()) {
+    rsgMutex->lock();
+  } else {
+    PthreadCall("write lock", pthread_rwlock_wrlock(&mu_));
+  }
+}
 
-void RWMutex::ReadUnlock() { PthreadCall("read unlock", pthread_rwlock_unlock(&mu_)); }
+void RWMutex::ReadUnlock() {
+  if (simgrid::rsg::isClient()) {
+    rsgMutex->unlock();
+  } else {
+    PthreadCall("read unlock", pthread_rwlock_unlock(&mu_));
+  }
+}
 
-void RWMutex::WriteUnlock() { PthreadCall("write unlock", pthread_rwlock_unlock(&mu_)); }
+void RWMutex::WriteUnlock() {
+  if (simgrid::rsg::isClient()) {
+    rsgMutex->unlock();
+  } else {
+    PthreadCall("write unlock", pthread_rwlock_unlock(&mu_));
+  }
+}
 
 int PhysicalCoreID() {
 #if defined(ROCKSDB_SCHED_GETCPU_PRESENT) && defined(__x86_64__) && \
@@ -167,6 +254,9 @@ void InitOnce(OnceType* once, void (*initializer)()) {
 void Crash(const std::string& srcfile, int srcline) {
   fprintf(stdout, "Crashing at %s:%d\n", srcfile.c_str(), srcline);
   fflush(stdout);
+  if (simgrid::rsg::isClient()) {
+    simgrid::rsg::this_actor::quit();
+  }
   kill(getpid(), SIGTERM);
 }
 
@@ -201,6 +291,40 @@ void cacheline_aligned_free(void *memblock) {
   free(memblock);
 }
 
+
+void
+instrumentedThread::swap(instrumentedThread& t) noexcept
+{
+  if (simgrid::rsg::isClient()) {
+    std::swap(actor,t.actor); // TODO correct (probably not complete)
+  }
+  _thread->swap(*(t._thread));
+}
+bool
+instrumentedThread::joinable() const noexcept
+{ return _thread->joinable(); }
+void
+instrumentedThread::join(){
+  if (simgrid::rsg::isClient()) {
+    actor->join();
+    delete actor;
+  }else{
+    _thread->join();
+  }
+}
+void
+instrumentedThread::detach(){
+  _thread->detach();
+}
+std::thread::id
+instrumentedThread::get_id() const noexcept
+{ return _thread->get_id(); }
+/** @pre thread is joinable
+  */
+std::thread::native_handle_type
+instrumentedThread::native_handle(){
+  return _thread->native_handle();
+}
 
 }  // namespace port
 }  // namespace rocksdb
