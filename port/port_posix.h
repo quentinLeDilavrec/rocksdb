@@ -219,7 +219,6 @@ public:
   }
 
   template<typename Arg>
-  explicit
     instrumentedThread(void* (*f)(void*), Arg arg)
   {
     if (simgrid::rsg::isClient()) {
@@ -235,7 +234,7 @@ public:
   }
 
   explicit
-    instrumentedgetpid(std::function<void()>&& f)
+    instrumentedThread(std::function<void()>&& f)
     {
       if (simgrid::rsg::isClient()) {
         simgrid::rsg::HostPtr currhost = simgrid::rsg::Host::current();
@@ -245,7 +244,7 @@ public:
         };
         actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
       } else {
-        _thread = new std::thread(std::forward<std::fuction<void()>>(f));
+        _thread = new std::thread(std::forward<std::function<void()>>(f));
       }
   }
   template<typename Callable>
@@ -264,7 +263,6 @@ public:
     }
   }
   template<typename Callable, typename... Args>
-    explicit
     instrumentedThread(Callable&& f, Args&&... args)
     {
       if (simgrid::rsg::isClient()) {
