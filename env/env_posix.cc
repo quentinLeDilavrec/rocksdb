@@ -92,7 +92,7 @@ static int LockOrUnlock(int fd, bool lock) {
   f.l_whence = SEEK_SET;
   f.l_start = 0;
   f.l_len = 0;        // Lock/unlock entire file
-  int value = fcntl(fd, F_SETLK, &f);
+  int value = fcntl(fd, F_SETLK, &f); // TODO simOS
 
   return value;
 }

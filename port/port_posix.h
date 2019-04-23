@@ -235,7 +235,7 @@ public:
   }
 
   explicit
-    instrumentedThread(std::function<void()> f)
+    instrumentedgetpid(std::function<void()>&& f)
     {
       if (simgrid::rsg::isClient()) {
         simgrid::rsg::HostPtr currhost = simgrid::rsg::Host::current();
@@ -245,7 +245,7 @@ public:
         };
         actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
       } else {
-        _thread = new std::thread(f);
+        _thread = new std::thread(std::forward<std::fuction<void()>>(f));
       }
   }
   template<typename Callable>
@@ -260,7 +260,7 @@ public:
       };
       actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
     } else {
-      _thread = new std::thread(f);
+      _thread = new std::thread(std::forward<Callable>(f));
     }
   }
   template<typename Callable, typename... Args>
@@ -274,23 +274,24 @@ public:
         };
         actor = simgrid::rsg::Actor::createActor((void**)&_thread, "rdbThread", currhost, newcode, NULL);
       } else {
-        _thread = new std::thread(f, args...);
+        _thread = new std::thread(std::forward<Callable>(f), std::forward<Args>(args)...);
       }
     }
   ~instrumentedThread()
   {
     if (simgrid::rsg::isClient()) {
-      delete actor;
+      actor->kill();
+    } else{
+      delete _thread;
     }
-    delete _thread;
   }
   instrumentedThread& operator=(const instrumentedThread&) = delete;
   instrumentedThread& operator=(instrumentedThread&& t) noexcept
   {
-    if (joinable())
-      std::terminate();
-    swap(t);
-    return *this;
+   if (joinable())
+     std::terminate();
+   swap(t);
+   return *this;
   }
   void
     swap(instrumentedThread& t) noexcept;
