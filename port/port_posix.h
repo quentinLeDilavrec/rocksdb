@@ -174,7 +174,7 @@ class CondVar {
 
 class instrumentedThread
 {
-  std::thread* _thread;
+  std::thread* _thread{};
   simgrid::rsg::Actor *actor;
 
   template<typename Functor, typename... Args>
@@ -279,8 +279,11 @@ public:
   {
     if (simgrid::rsg::isClient()) {
       actor->kill();
+      if (actor)
+        delete actor;
     } else{
-      delete _thread;
+      /* if (_thread) */
+      /*   delete _thread; */
     }
   }
   instrumentedThread& operator=(const instrumentedThread&) = delete;

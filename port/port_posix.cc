@@ -298,7 +298,8 @@ instrumentedThread::swap(instrumentedThread& t) noexcept
   if (simgrid::rsg::isClient()) {
     std::swap(actor,t.actor); // TODO correct (probably not complete)
   }
-  _thread->swap(*(t._thread));
+  if (_thread && t._thread)
+    _thread->swap(*(t._thread));
 }
 bool
 instrumentedThread::joinable() const noexcept
@@ -309,7 +310,8 @@ instrumentedThread::join(){
     actor->join();
     delete actor;
   }else{
-    _thread->join();
+    if(_thread)
+      _thread->join();
   }
 }
 void
